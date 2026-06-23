@@ -1,6 +1,14 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const Io = std.Io;
 
+const Action = enum {
+    generate,
+    clear,
+    help,
+};
+
+// ASCII '!' - '~'
 const alphabet_start = 33;
 const alphabet_end = 127;
 const alphabet_len = alphabet_end - alphabet_start;
@@ -11,19 +19,36 @@ pub fn main(init: std.process.Init) !void {
     var key: [32]u8 = @splat('0');
     defer std.crypto.secureZero(u8, &key);
 
-    const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len > 2) return error.TooManyArguments;
-    if (args.len == 2) {
-        const action = args[1];
-        if (std.mem.eql(u8, "help", action) or std.mem.eql(u8, "--help", action)) {
-            std.log.info("{s}", .{help});
+    const action: Action = blk: {
+        var iter = init.minimal.args.iterate();
+        _ = iter.skip(); // Program name
+        const arg = iter.next();
+        if (iter.skip()) return error.TooManyArguments;
+        if (arg) |action| {
+            if (std.mem.eql(u8, "help", action) or std.mem.eql(u8, "--help", action)) {
+                break :blk .help;
+            } else if (std.mem.eql(u8, "clear", action)) {
+                break :blk .clear;
+            } else if (std.mem.eql(u8, "generate", action)) {
+                break :blk .generate;
+            } else return error.UnrecognizedAction;
+        } else break :blk .generate;
+    };
+
+    var message: []const u8 = "copied password to clipboard";
+    var buffer: [128]u8 = undefined;
+
+    switch (action) {
+        .generate => try generateKey(io, &key),
+        .clear => message = "cleared clipboard",
+        .help => {
+            const stdout = std.Io.File.stdout();
+            var w = stdout.writer(io, &buffer);
+            try w.interface.writeAll(help);
+            try w.flush();
             return;
-        } else if (std.mem.eql(u8, "clear", action)) {
-            // clear clipboard
-        } else if (std.mem.eql(u8, "generate", action)) {
-            try mapToAlphabet(io, &key);
-        } else return error.UnrecognizedAction;
-    } else try mapToAlphabet(io, &key);
+        },
+    }
 
     var pbcopy = try std.process.spawn(io, .{
         .argv = &.{"pbcopy"},
@@ -31,7 +56,6 @@ pub fn main(init: std.process.Init) !void {
     });
 
     if (pbcopy.stdin) |stdin| {
-        var buffer: [128]u8 = undefined;
         defer std.crypto.secureZero(u8, &buffer);
         var w = pbcopy.stdin.?.writer(io, &buffer);
         try w.interface.writeAll(&key);
@@ -40,7 +64,7 @@ pub fn main(init: std.process.Init) !void {
     } else std.log.err("stdin failed", .{});
     switch (try pbcopy.wait(io)) {
         .exited => |ret| if (ret == 0) {
-            std.log.info("copied password to clipboard", .{});
+            std.log.info("{s}", .{message});
             return;
         } else {
             std.log.err("pbcopy exited with non-zero return code: {}", .{ret});
@@ -61,15 +85,17 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-fn mapToAlphabet(io: std.Io, out: []u8) !void {
+fn generateKey(io: std.Io, out: []u8) !void {
     const range = std.math.maxInt(u8);
+    comptime assert(range >= alphabet_len);
     const limit = range - (range % alphabet_len);
+    comptime assert(limit % alphabet_len == 0);
 
     var entropy: [32]u8 = undefined;
     defer std.crypto.secureZero(u8, &entropy);
     var idx: usize = 0;
-    while (true) {
-        try io.randomSecure(std.mem.sliceAsBytes(&entropy));
+    for (0..1 << 10) |_| {
+        try io.randomSecure(&entropy);
         for (&entropy) |val| {
             if (val < limit) {
                 out[idx] = val % alphabet_len + alphabet_start;
@@ -78,6 +104,7 @@ fn mapToAlphabet(io: std.Io, out: []u8) !void {
             }
         }
     }
+    return error.TryAgain;
 }
 
 const help =
@@ -91,4 +118,6 @@ const help =
     \\  generate    same as (none)
     \\  help        show this help message
     \\  clear       wipe the system clipboard
+    \\
+    \\
 ;
