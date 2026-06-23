@@ -1,0 +1,86 @@
+name: Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Test
+        run: zig build test
+
+  build:
+    name: ${{ matrix.archive }}
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-macos
+            cpu: baseline
+            os: macos-latest
+            archive: rapa-macos-aarch64.tar.gz
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+          cache-key: ${{ matrix.os }}-0.16.0
+
+      - name: Build
+        run: zig build -Dtarget=${{ matrix.target }} -Dcpu=${{ matrix.cpu }} -Doptimize=ReleaseFast
+
+      - name: Package SDK Architecture (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p staging
+
+          cp zig-out/bin/rapa staging/rapa
+
+          chmod +x staging/rapa
+
+          mkdir dist
+          tar -czf dist/${{ matrix.archive }} -C staging .
+
+      - name: Upload Packaged Asset
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.archive }}
+          path: dist/
+
+  release:
+    name: Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all compressed assets
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v3
+        with:
+          files: artifacts/*
+          generate_release_notes: true
