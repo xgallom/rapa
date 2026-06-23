@@ -13,11 +13,12 @@ const alphabet_start = 33;
 const alphabet_end = 127;
 const alphabet_len = alphabet_end - alphabet_start;
 
+var buffer: [128]u8 = undefined;
+
+const pbcopy_argv: []const []const u8 = &.{"pbcopy"};
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
-
-    var key: [32]u8 = @splat('0');
-    defer std.crypto.secureZero(u8, &key);
 
     const action: Action = blk: {
         var iter = init.minimal.args.iterate();
@@ -35,52 +36,20 @@ pub fn main(init: std.process.Init) !void {
         } else break :blk .generate;
     };
 
-    var message: []const u8 = "copied password to clipboard";
-    var buffer: [128]u8 = undefined;
-
     switch (action) {
-        .generate => try generateKey(io, &key),
-        .clear => message = "cleared clipboard",
+        .generate => {
+            var key: [32]u8 = undefined;
+            defer std.crypto.secureZero(u8, &key);
+            try generateKey(io, &key);
+            try setClipboard(pbcopy_argv, "copied password to clipboard", io, &key);
+        },
+        .clear => try setClipboard(pbcopy_argv, "cleared clipboard", io, &.{}),
         .help => {
             const stdout = std.Io.File.stdout();
             var w = stdout.writer(io, &buffer);
             try w.interface.writeAll(help);
             try w.flush();
             return;
-        },
-    }
-
-    var pbcopy = try std.process.spawn(io, .{
-        .argv = &.{"pbcopy"},
-        .stdin = .pipe,
-    });
-
-    if (pbcopy.stdin) |stdin| {
-        defer std.crypto.secureZero(u8, &buffer);
-        var w = pbcopy.stdin.?.writer(io, &buffer);
-        try w.interface.writeAll(&key);
-        try w.flush();
-        stdin.close(io);
-    } else std.log.err("stdin failed", .{});
-    switch (try pbcopy.wait(io)) {
-        .exited => |ret| if (ret == 0) {
-            std.log.info("{s}", .{message});
-            return;
-        } else {
-            std.log.err("pbcopy exited with non-zero return code: {}", .{ret});
-            return error.ChildFailed;
-        },
-        .signal => |ret| {
-            std.log.err("pbcopy failed: signal {}", .{ret});
-            return error.ChildFailed;
-        },
-        .stopped => |ret| {
-            std.log.err("pbcopy failed: stopped {}", .{ret});
-            return error.ChildFailed;
-        },
-        .unknown => |ret| {
-            std.log.err("pbcopy failed: unknown {}", .{ret});
-            return error.ChildFailed;
         },
     }
 }
@@ -105,6 +74,51 @@ fn generateKey(io: std.Io, out: []u8) !void {
         }
     }
     return error.TryAgain;
+}
+
+fn setClipboard(
+    comptime argv: []const []const u8,
+    comptime message: []const u8,
+    io: std.Io,
+    payload: []const u8,
+) !void {
+    var child = try std.process.spawn(io, .{
+        .argv = argv,
+        .stdin = .pipe,
+    });
+
+    if (child.stdin) |stdin| {
+        defer std.crypto.secureZero(u8, &buffer);
+        var w = stdin.writer(io, &buffer);
+        try w.interface.writeAll(payload);
+        try w.flush();
+        stdin.close(io);
+    } else {
+        std.log.err(argv[0] ++ " failed: stdin is not open", .{});
+        child.kill(io);
+        return error.ClibpoardFailed;
+    }
+    switch (try child.wait(io)) {
+        .exited => |ret| if (ret == 0) {
+            std.log.info("{s}", .{message});
+            return;
+        } else {
+            std.log.err(argv[0] ++ " exited with non-zero return code: {}", .{ret});
+            return error.ClibpoardFailed;
+        },
+        .signal => |ret| {
+            std.log.err(argv[0] ++ " failed: signal {}", .{ret});
+            return error.ClibpoardFailed;
+        },
+        .stopped => |ret| {
+            std.log.err(argv[0] ++ " failed: stopped {}", .{ret});
+            return error.ClibpoardFailed;
+        },
+        .unknown => |ret| {
+            std.log.err(argv[0] ++ " failed: unknown {}", .{ret});
+            return error.ClibpoardFailed;
+        },
+    }
 }
 
 const help =
